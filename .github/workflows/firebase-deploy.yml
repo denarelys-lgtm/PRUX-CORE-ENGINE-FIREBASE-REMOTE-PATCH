@@ -1,0 +1,34 @@
+name: Deploy PRUX Firebase Hosting and Database Rules
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'web/**'
+      - 'firebase.json'
+      - 'database.rules.json'
+      - '.firebaserc'
+      - '.github/workflows/firebase-deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Configure Firebase service account
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          test -n "$FIREBASE_SERVICE_ACCOUNT" || { echo 'Missing FIREBASE_SERVICE_ACCOUNT secret'; exit 1; }
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/firebase-service-account.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/firebase-service-account.json" >> "$GITHUB_ENV"
+      - name: Install Firebase CLI
+        run: npm install --global firebase-tools
+      - name: Ensure default Hosting site exists
+        run: firebase hosting:sites:create detectcameracentral --project detectcameracentral || true
+      - name: Deploy Hosting and Realtime Database rules
+        run: firebase deploy --only hosting,database --project detectcameracentral --non-interactive
