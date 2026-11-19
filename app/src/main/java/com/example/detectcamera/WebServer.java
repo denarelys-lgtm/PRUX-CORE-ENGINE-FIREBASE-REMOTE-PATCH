@@ -1,24 +1,36 @@
+
 package com.example.detectcamera;
 
 import android.media.projection.MediaProjection;
 import android.util.Base64;
+
 import fi.iki.elonen.NanoHTTPD;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 
 public class WebServer extends NanoHTTPD {
 
     private byte[] ultimoFramePantalla = null;
     private byte[] ultimoFrameCamara = null;
+
     private long secuenciaPantalla = 0;
     private long secuenciaCamara = 0;
+
     private final Object frameLock = new Object();
+
     private String usuarioValido = "";
     private String passwordValida = "";
+
     private CameraService cameraService;
-    private final AudioStreamManager audioStreamManager = new AudioStreamManager();
+
+    private final AudioStreamManager audioStreamManager =
+            new AudioStreamManager();
 
     private int modoCapturaPantalla = 0;
     private Thread threadCapturaShell = null;
@@ -70,13 +82,17 @@ public class WebServer extends NanoHTTPD {
                 cameraService.detenerProyeccionPantalla();
             }
             iniciarHiloShell();
+
         } else if (nuevoModo == 1) {
             detenerHiloShell();
+
             if (cameraService != null) {
                 cameraService.activarCapturaPantalla();
             }
+
         } else {
             detenerHiloShell();
+
             if (cameraService != null) {
                 cameraService.detenerProyeccionPantalla();
             }
@@ -84,17 +100,22 @@ public class WebServer extends NanoHTTPD {
     }
 
     private void iniciarHiloShell() {
-        if (threadCapturaShell != null && threadCapturaShell.isAlive()) return;
+        if (threadCapturaShell != null && threadCapturaShell.isAlive()) {
+            return;
+        }
 
         threadCapturaShell = new Thread(() -> {
-            while (modoCapturaPantalla == 2 && !Thread.currentThread().isInterrupted()) {
+            while (modoCapturaPantalla == 2
+                    && !Thread.currentThread().isInterrupted()) {
+
                 byte[] frameJpeg = ShellScreenCapture.capturarFramePng();
+
                 if (frameJpeg != null) {
                     actualizarFramePantalla(frameJpeg);
                 }
+
                 try {
-                    // Optimización: Intervalo de pausa pasiva eficiente para liberar CPU
-                    Thread.sleep(100); 
+                    Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -112,94 +133,297 @@ public class WebServer extends NanoHTTPD {
         }
     }
 
+    /**
+     * Comprueba primero la cookie persistente y después HTTP Basic.
+     * Si ninguno es válido, el acceso se deniega.
+     */
     private boolean estaAutenticado(IHTTPSession session) {
-        // Fail closed: un servidor publicado nunca acepta sesiones sin credenciales.
+
+        // 1. Sesión persistente mediante cookie HttpOnly.
+        String cookieHeader = session.getHeaders().get("cookie");
+
+        if (cookieHeader != null) {
+            String[] cookies = cookieHeader.split(";");
+
+            for (String item : cookies) {
+                String cookie = item.trim();
+
+                if (cookie.startsWith("PRUXSESSION=")) {
+                    String value = cookie.substring(
+                            "PRUXSESSION=".length()
+                    );
+
+                    if (DeviceSessionManager.isSessionValid(value)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // 2. HTTP Basic continúa disponible como alternativa.
         if (usuarioValido.isEmpty() || passwordValida.isEmpty()) {
             return false;
         }
 
         String authHeader = session.getHeaders().get("authorization");
+
         if (authHeader != null && authHeader.startsWith("Basic ")) {
             try {
                 String base64Creds = authHeader.substring(6).trim();
-                String credenciales = new String(Base64.decode(base64Creds, Base64.DEFAULT));
+
+                String credenciales = new String(
+                        Base64.decode(base64Creds, Base64.DEFAULT),
+                        StandardCharsets.UTF_8
+                );
+
                 String[] partes = credenciales.split(":", 2);
+
                 if (partes.length == 2) {
-                    return usuarioValido.equals(partes[0]) && passwordValida.equals(partes[1]);
+                    return usuarioValido.equals(partes[0])
+                            && passwordValida.equals(partes[1]);
                 }
-            } catch (Exception ignored) {}
+
+            } catch (Exception error) {
+                android.util.Log.w(
+                        "WebServer",
+                        "Cabecera HTTP Basic inválida."
+                );
+            }
         }
+
         return false;
     }
 
+    /**
+     * Canjea un ticket temporal por una cookie persistente.
+     * Esta es la única ruta pública del servidor.
+     */
+    private Response intercambiarTicket(IHTTPSession session) {
+
+        if (session.getMethod() != Method.POST) {
+            return newFixedLengthResponse(
+                    Response.Status.METHOD_NOT_ALLOWED,
+                    "text/plain; charset=utf-8",
+                    "Solo se permite POST."
+            );
+        }
+
+        String origin = session.getHeaders().get("origin");
+
+        if (!"https://detectcameracentral.web.app".equals(origin)) {
+            return newFixedLengthResponse(
+                    Response.Status.FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    "Origen no autorizado."
+            );
+        }
+
+        String contentType = session.getHeaders().get("content-type");
+
+        if (contentType == null
+                || !contentType.toLowerCase(java.util.Locale.US)
+                .startsWith("application/x-www-form-urlencoded")) {
+
+            return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "text/plain; charset=utf-8",
+                    "Formato de solicitud no válido."
+            );
+        }
+
+        try {
+            Map<String, String> files = new HashMap<>();
+
+            session.parseBody(files);
+
+            String ticket = session.getParms().get("ticket");
+
+            if (ticket == null || ticket.trim().isEmpty()) {
+                return newFixedLengthResponse(
+                        Response.Status.BAD_REQUEST,
+                        "text/plain; charset=utf-8",
+                        "Falta el ticket de acceso."
+                );
+            }
+
+            String cookie = DeviceSessionManager.exchangeTicket(ticket);
+
+            if (cookie == null) {
+                return newFixedLengthResponse(
+                        Response.Status.UNAUTHORIZED,
+                        "text/plain; charset=utf-8",
+                        "Ticket inválido, expirado o ya utilizado."
+                );
+            }
+
+            String html =
+                    "<!doctype html><html lang='es'><head>"
+                    + "<meta charset='utf-8'>"
+                    + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    + "<title>PRUX conectado</title>"
+                    + "</head><body>"
+                    + "<p>Acceso autorizado. Abriendo panel PRUX...</p>"
+                    + "<script>location.replace('/');</script>"
+                    + "</body></html>";
+
+            Response response = newFixedLengthResponse(
+                    Response.Status.OK,
+                    "text/html; charset=utf-8",
+                    html
+            );
+
+            response.addHeader(
+                    "Set-Cookie",
+                    "PRUXSESSION=" + cookie
+                            + "; Path=/"
+                            + "; Max-Age=315360000"
+                            + "; Secure"
+                            + "; HttpOnly"
+                            + "; SameSite=Lax"
+            );
+
+            response.addHeader(
+                    "Cache-Control",
+                    "no-store, no-cache, must-revalidate"
+            );
+
+            response.addHeader("Pragma", "no-cache");
+            response.addHeader("Referrer-Policy", "no-referrer");
+            response.addHeader("X-Content-Type-Options", "nosniff");
+
+            return response;
+
+        } catch (Exception error) {
+            android.util.Log.e(
+                    "WebServer",
+                    "Error intercambiando ticket.",
+                    error
+            );
+
+            return newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "text/plain; charset=utf-8",
+                    "No se pudo completar la autenticación."
+            );
+        }
+    }
+
     private InputStream crearMJPEGStream(final boolean esCamara) {
+
         return new InputStream() {
+
             private ByteArrayInputStream currentFrameStream;
             private long ultimaSecuencia = -1L;
             private volatile boolean cerrado = false;
 
             @Override
             public int read() throws IOException {
-                if (cerrado) return -1;
-                if (currentFrameStream == null || currentFrameStream.available() == 0) {
-                    if (!cargarSiguienteFrame()) return -1;
+                if (cerrado) {
+                    return -1;
                 }
+
+                if (currentFrameStream == null
+                        || currentFrameStream.available() == 0) {
+
+                    if (!cargarSiguienteFrame()) {
+                        return -1;
+                    }
+                }
+
                 return currentFrameStream.read();
             }
 
             @Override
             public int read(byte[] b, int off, int len) throws IOException {
-                if (cerrado) return -1;
-                if (b == null) throw new NullPointerException("b");
+                if (cerrado) {
+                    return -1;
+                }
+
+                if (b == null) {
+                    throw new NullPointerException("b");
+                }
+
                 if (off < 0 || len < 0 || len > b.length - off) {
                     throw new IndexOutOfBoundsException();
                 }
-                if (len == 0) return 0;
 
-                if (currentFrameStream == null || currentFrameStream.available() == 0) {
-                    if (!cargarSiguienteFrame()) return -1;
+                if (len == 0) {
+                    return 0;
                 }
+
+                if (currentFrameStream == null
+                        || currentFrameStream.available() == 0) {
+
+                    if (!cargarSiguienteFrame()) {
+                        return -1;
+                    }
+                }
+
                 return currentFrameStream.read(b, off, len);
             }
 
             private boolean cargarSiguienteFrame() {
-                synchronized (frameLock) {
-                    while (!cerrado) {
-                        byte[] frame = esCamara ? ultimoFrameCamara : ultimoFramePantalla;
-                        long secuencia = esCamara ? secuenciaCamara : secuenciaPantalla;
 
-                        if (frame != null && frame.length > 0 && secuencia != ultimaSecuencia) {
+                synchronized (frameLock) {
+
+                    while (!cerrado) {
+
+                        byte[] frame = esCamara
+                                ? ultimoFrameCamara
+                                : ultimoFramePantalla;
+
+                        long secuencia = esCamara
+                                ? secuenciaCamara
+                                : secuenciaPantalla;
+
+                        if (frame != null
+                                && frame.length > 0
+                                && secuencia != ultimaSecuencia) {
+
                             ultimaSecuencia = secuencia;
 
                             String header =
-                                    "--frame\r\n" +
-                                    "Content-Type: image/jpeg\r\n" +
-                                    "Content-Length: " + frame.length + "\r\n" +
-                                    "Cache-Control: no-cache, no-store\r\n\r\n";
+                                    "--frame\r\n"
+                                    + "Content-Type: image/jpeg\r\n"
+                                    + "Content-Length: " + frame.length + "\r\n"
+                                    + "Cache-Control: no-cache, no-store\r\n\r\n";
 
                             ByteArrayOutputStream baos =
-                                    new ByteArrayOutputStream(header.length() + frame.length + 2);
+                                    new ByteArrayOutputStream(
+                                            header.length() + frame.length + 2
+                                    );
+
                             try {
-                                baos.write(header.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                                baos.write(
+                                        header.getBytes(
+                                                StandardCharsets.US_ASCII
+                                        )
+                                );
+
                                 baos.write(frame);
                                 baos.write('\r');
                                 baos.write('\n');
+
                             } catch (IOException e) {
                                 return false;
                             }
 
-                            currentFrameStream = new ByteArrayInputStream(baos.toByteArray());
+                            currentFrameStream = new ByteArrayInputStream(
+                                    baos.toByteArray()
+                            );
+
                             return true;
                         }
 
                         try {
-                            // Espera pasiva inteligente que no consume CPU hasta recibir un nuevo frame
                             frameLock.wait(2000L);
+
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             return false;
                         }
                     }
+
                     return false;
                 }
             }
@@ -207,9 +431,11 @@ public class WebServer extends NanoHTTPD {
             @Override
             public void close() throws IOException {
                 cerrado = true;
+
                 synchronized (frameLock) {
                     frameLock.notifyAll();
                 }
+
                 super.close();
             }
         };
@@ -217,70 +443,144 @@ public class WebServer extends NanoHTTPD {
 
     @Override
     public Response serve(IHTTPSession session) {
-        if (!estaAutenticado(session)) {
-            Response response = newFixedLengthResponse(
-                    Response.Status.UNAUTHORIZED, 
-                    "text/plain", 
-                    "Acceso Denegado."
-            );
-            response.addHeader("WWW-Authenticate", "Basic realm=\"Acceso Restringido\"");
-            return response;
-        }
 
         String uri = session.getUri();
 
+        // Única excepción al filtro global: canje de ticket temporal.
+        if ("/auth/exchange".equals(uri)) {
+            return intercambiarTicket(session);
+        }
+
+        // Todas las demás rutas siguen protegidas.
+        if (!estaAutenticado(session)) {
+
+            Response response = newFixedLengthResponse(
+                    Response.Status.UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    "Acceso Denegado."
+            );
+
+            response.addHeader(
+                    "WWW-Authenticate",
+                    "Basic realm=\"Acceso Restringido\""
+            );
+
+            response.addHeader("Cache-Control", "no-store");
+
+            return response;
+        }
+
         if ("/screen_stream".equals(uri)) {
+
             Response response = newChunkedResponse(
                     Response.Status.OK,
                     "multipart/x-mixed-replace; boundary=frame",
                     crearMJPEGStream(false)
             );
-            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+
+            response.addHeader(
+                    "Cache-Control",
+                    "no-cache, no-store, must-revalidate"
+            );
+
             response.addHeader("Connection", "keep-alive");
+
             return response;
         }
 
         if ("/camera_stream".equals(uri)) {
+
             Response response = newChunkedResponse(
                     Response.Status.OK,
                     "multipart/x-mixed-replace; boundary=frame",
                     crearMJPEGStream(true)
             );
-            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+
+            response.addHeader(
+                    "Cache-Control",
+                    "no-cache, no-store, must-revalidate"
+            );
+
             response.addHeader("Connection", "keep-alive");
+
             return response;
         }
 
         if ("/audio.wav".equals(uri)) {
-            String modeParam = session.getParms().get("mode");
-            int modo = 1;
-            if ("2".equals(modeParam)) modo = 2;
 
-            MediaProjection projection = (cameraService != null) ? cameraService.getMediaProjection() : null;
-            InputStream audioStream = audioStreamManager.iniciarCaptura(modo, projection);
+            String modeParam = session.getParms().get("mode");
+
+            int modo = 1;
+
+            if ("2".equals(modeParam)) {
+                modo = 2;
+            }
+
+            MediaProjection projection = (cameraService != null)
+                    ? cameraService.getMediaProjection()
+                    : null;
+
+            InputStream audioStream =
+                    audioStreamManager.iniciarCaptura(modo, projection);
 
             if (audioStream != null) {
-                return newChunkedResponse(Response.Status.OK, "audio/wav", audioStream);
+                return newChunkedResponse(
+                        Response.Status.OK,
+                        "audio/wav",
+                        audioStream
+                );
             }
-            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error de audio");
+
+            return newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "text/plain",
+                    "Error de audio"
+            );
         }
 
         if ("/api/camera".equals(uri)) {
+
             String action = session.getParms().get("action");
+
             if (cameraService != null) {
-                if ("on".equals(action)) cameraService.iniciarCamara();
-                else if ("off".equals(action)) cameraService.detenerCamara();
-                else if ("toggle".equals(action)) cameraService.alternarCamara();
+                if ("on".equals(action)) {
+                    cameraService.iniciarCamara();
+
+                } else if ("off".equals(action)) {
+                    cameraService.detenerCamara();
+
+                } else if ("toggle".equals(action)) {
+                    cameraService.alternarCamara();
+                }
             }
-            return newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\"}");
+
+            return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    "{\"status\":\"ok\"}"
+            );
         }
 
         if ("/api/screen".equals(uri)) {
+
             String action = session.getParms().get("action");
-            if ("start".equals(action)) cambiarModoPantalla(1);
-            else if ("bypass".equals(action)) cambiarModoPantalla(2);
-            else if ("stop".equals(action)) cambiarModoPantalla(0);
-            return newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\", \"modo\":" + modoCapturaPantalla + "}");
+
+            if ("start".equals(action)) {
+                cambiarModoPantalla(1);
+
+            } else if ("bypass".equals(action)) {
+                cambiarModoPantalla(2);
+
+            } else if ("stop".equals(action)) {
+                cambiarModoPantalla(0);
+            }
+
+            return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    "{\"status\":\"ok\", \"modo\":"
+                            + modoCapturaPantalla + "}"
+            );
         }
 
         String html = "<!DOCTYPE html>"
@@ -470,6 +770,10 @@ public class WebServer extends NanoHTTPD {
                 + "</body>"
                 + "</html>";
 
-        return newFixedLengthResponse(Response.Status.OK, "text/html", html);
+        return newFixedLengthResponse(
+                Response.Status.OK,
+                "text/html",
+                html
+        );
     }
 }
