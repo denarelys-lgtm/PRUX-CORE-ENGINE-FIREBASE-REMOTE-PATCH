@@ -9,7 +9,6 @@ initializeApp({
 });
 
 const db = getDatabase();
-
 const REGION = "us-central1";
 const TICKET_LIFETIME_MS = 2 * 60 * 1000;
 
@@ -43,7 +42,7 @@ function validateDeviceId(deviceId) {
   }
 }
 
-async function getRegisteredDevice(deviceId) {
+async function getRegisteredDevice(deviceId, requireTunnel) {
   const snapshot = await db.ref("dispositivos/" + deviceId).get();
 
   if (!snapshot.exists()) {
@@ -67,14 +66,16 @@ async function getRegisteredDevice(deviceId) {
     );
   }
 
-  if (
-    typeof device.url !== "string" ||
-    !/^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i.test(device.url)
-  ) {
-    throw new HttpsError(
-      "failed-precondition",
-      "El túnel del dispositivo no está disponible."
-    );
+  if (requireTunnel) {
+    if (
+      typeof device.url !== "string" ||
+      !/^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i.test(device.url)
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "El túnel del dispositivo no está disponible."
+      );
+    }
   }
 
   return device;
@@ -91,9 +92,10 @@ exports.createDeviceAccessTicket = onCall(
     const deviceId = request.data && request.data.deviceId;
     validateDeviceId(deviceId);
 
-    const device = await getRegisteredDevice(deviceId);
+    const device = await getRegisteredDevice(deviceId, true);
 
     const ticket = crypto.randomBytes(32).toString("base64url");
+
     const ticketHash = crypto
       .createHash("sha256")
       .update(ticket)
@@ -101,9 +103,9 @@ exports.createDeviceAccessTicket = onCall(
 
     const now = Date.now();
     const expiresAt = now + TICKET_LIFETIME_MS;
+
     const authRef = db.ref("deviceAuth/" + deviceId);
 
-    // La transacción conserva la generación actual y reemplaza el ticket.
     const transaction = await authRef.transaction((current) => {
       const state = current && typeof current === "object"
         ? current
@@ -112,6 +114,7 @@ exports.createDeviceAccessTicket = onCall(
       const generation = Number(state.generation || 0);
 
       state.generation = generation;
+
       state.ticket = {
         hash: ticketHash,
         createdAt: now,
@@ -148,12 +151,11 @@ exports.revokeDeviceAccess = onCall(
     const deviceId = request.data && request.data.deviceId;
     validateDeviceId(deviceId);
 
-    await getRegisteredDevice(deviceId);
+    // Se puede revocar aunque el teléfono esté desconectado.
+    await getRegisteredDevice(deviceId, false);
 
     const authRef = db.ref("deviceAuth/" + deviceId);
 
-    // Incrementar generación invalida todas las cookies anteriores.
-    // También elimina cualquier ticket que todavía no se haya canjeado.
     const transaction = await authRef.transaction((current) => {
       const state = current && typeof current === "object"
         ? current
@@ -162,6 +164,7 @@ exports.revokeDeviceAccess = onCall(
       const generation = Number(state.generation || 0);
 
       state.generation = generation + 1;
+
       delete state.ticket;
 
       return state;
@@ -176,7 +179,9 @@ exports.revokeDeviceAccess = onCall(
 
     return {
       success: true,
-      generation: Number(transaction.snapshot.child("generation").val() || 0)
+      generation: Number(
+        transaction.snapshot.child("generation").val() || 0
+      )
     };
   }
 );
