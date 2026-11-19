@@ -1,3 +1,4 @@
+
 {
   "rules": {
     "admins": {
@@ -11,6 +12,12 @@
       "$deviceId": {
         ".write": "auth != null && newData.child('firebaseUid').val() == auth.uid",
         ".validate": "newData.hasChildren(['modelo', 'androidId', 'firebaseUid', 'plataforma', 'estado', 'timestamp']) && newData.child('androidId').val() == $deviceId && newData.child('firebaseUid').val() == auth.uid"
+      }
+    },
+    "deviceAuth": {
+      "$deviceId": {
+        ".read": "auth != null && auth.uid == root.child('dispositivos').child($deviceId).child('firebaseUid').val()",
+        ".write": false
       }
     }
   }
