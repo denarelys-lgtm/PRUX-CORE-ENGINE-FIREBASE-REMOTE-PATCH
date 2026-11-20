@@ -134,63 +134,58 @@ public class WebServer extends NanoHTTPD {
     }
 
     /**
-     * Comprueba primero la cookie persistente y después HTTP Basic.
-     * Si ninguno es válido, el acceso se deniega.
+     * En el túnel público solo se acepta la sesión emitida por PRUX Central.
+     * En la LAN se conserva HTTP Basic para no romper el acceso IP:8080.
      */
-    private boolean estaAutenticado(IHTTPSession session) {
+    private boolean esHostTunnel(String host) {
+        if (host == null) return false;
+        String normalized = host.trim().toLowerCase(java.util.Locale.US);
+        int colon = normalized.indexOf(':');
+        if (colon >= 0) normalized = normalized.substring(0, colon);
+        return normalized.endsWith(".trycloudflare.com");
+    }
 
-        // 1. Sesión persistente mediante cookie HttpOnly.
+    private boolean tieneCookieValida(IHTTPSession session) {
         String cookieHeader = session.getHeaders().get("cookie");
+        if (cookieHeader == null) return false;
 
-        if (cookieHeader != null) {
-            String[] cookies = cookieHeader.split(";");
-
-            for (String item : cookies) {
-                String cookie = item.trim();
-
-                if (cookie.startsWith("PRUXSESSION=")) {
-                    String value = cookie.substring(
-                            "PRUXSESSION=".length()
-                    );
-
-                    if (DeviceSessionManager.isSessionValid(value)) {
-                        return true;
-                    }
-                }
+        for (String item : cookieHeader.split(";")) {
+            String cookie = item.trim();
+            if (cookie.startsWith("PRUXSESSION=")) {
+                String value = cookie.substring("PRUXSESSION=".length());
+                if (DeviceSessionManager.isSessionValid(value)) return true;
             }
         }
+        return false;
+    }
 
-        // 2. HTTP Basic continúa disponible como alternativa.
-        if (usuarioValido.isEmpty() || passwordValida.isEmpty()) {
-            return false;
-        }
+    private boolean estaAutenticado(IHTTPSession session) {
+        // La cookie temporal/permanente es válida tanto para remoto como para LAN.
+        if (tieneCookieValida(session)) return true;
+
+        // Nunca aceptar HTTP Basic a través del dominio público del túnel.
+        String host = session.getHeaders().get("host");
+        if (esHostTunnel(host)) return false;
+
+        // Acceso directo en la red local: conservar las credenciales existentes.
+        if (usuarioValido.isEmpty() || passwordValida.isEmpty()) return false;
 
         String authHeader = session.getHeaders().get("authorization");
-
         if (authHeader != null && authHeader.startsWith("Basic ")) {
             try {
                 String base64Creds = authHeader.substring(6).trim();
-
                 String credenciales = new String(
                         Base64.decode(base64Creds, Base64.DEFAULT),
                         StandardCharsets.UTF_8
                 );
-
                 String[] partes = credenciales.split(":", 2);
-
-                if (partes.length == 2) {
-                    return usuarioValido.equals(partes[0])
-                            && passwordValida.equals(partes[1]);
-                }
-
+                return partes.length == 2
+                        && usuarioValido.equals(partes[0])
+                        && passwordValida.equals(partes[1]);
             } catch (Exception error) {
-                android.util.Log.w(
-                        "WebServer",
-                        "Cabecera HTTP Basic inválida."
-                );
+                android.util.Log.w("WebServer", "Cabecera HTTP Basic inválida.");
             }
         }
-
         return false;
     }
 
@@ -209,8 +204,12 @@ public class WebServer extends NanoHTTPD {
         }
 
         String origin = session.getHeaders().get("origin");
+        String requestHost = session.getHeaders().get("host");
 
-        if (!"https://detectcameracentral.web.app".equals(origin)) {
+        boolean panelOrigin = "https://detectcameracentral.web.app".equals(origin)
+                || "https://detectcameracentral.firebaseapp.com".equals(origin);
+
+        if (!esHostTunnel(requestHost) || !panelOrigin) {
             return newFixedLengthResponse(
                     Response.Status.FORBIDDEN,
                     "text/plain; charset=utf-8",
@@ -460,10 +459,12 @@ public class WebServer extends NanoHTTPD {
                     "Acceso Denegado."
             );
 
-            response.addHeader(
-                    "WWW-Authenticate",
-                    "Basic realm=\"Acceso Restringido\""
-            );
+            if (!esHostTunnel(session.getHeaders().get("host"))) {
+                response.addHeader(
+                        "WWW-Authenticate",
+                        "Basic realm=\"Acceso Restringido\""
+                );
+            }
 
             response.addHeader("Cache-Control", "no-store");
 
