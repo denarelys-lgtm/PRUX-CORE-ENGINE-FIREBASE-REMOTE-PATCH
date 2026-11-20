@@ -2,7 +2,6 @@
 package com.example.detectcamera;
 
 import android.media.projection.MediaProjection;
-import android.util.Base64;
 
 import fi.iki.elonen.NanoHTTPD;
 
@@ -10,7 +9,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -24,8 +22,6 @@ public class WebServer extends NanoHTTPD {
 
     private final Object frameLock = new Object();
 
-    private String usuarioValido = "";
-    private String passwordValida = "";
 
     private CameraService cameraService;
 
@@ -49,9 +45,10 @@ public class WebServer extends NanoHTTPD {
         }
     }
 
+    /** Compatibilidad con llamadas antiguas: HTTP Basic fue eliminado por completo. */
+    @Deprecated
     public void setCredenciales(String user, String pass) {
-        this.usuarioValido = user != null ? user.trim() : "";
-        this.passwordValida = pass != null ? pass.trim() : "";
+        // Intencionalmente vacío: el servidor ya no almacena ni valida contraseñas.
     }
 
     public void actualizarFramePantalla(byte[] frame) {
@@ -134,8 +131,9 @@ public class WebServer extends NanoHTTPD {
     }
 
     /**
-     * En el túnel público solo se acepta la sesión emitida por PRUX Central.
-     * En la LAN se conserva HTTP Basic para no romper el acceso IP:8080.
+     * En la LAN el panel se abre directamente, sin usuario ni contraseña.
+     * En el dominio público Quick Tunnel solo se acepta una sesión emitida
+     * después de que PRUX Central autorice un ticket temporal.
      */
     private boolean esHostTunnel(String host) {
         if (host == null) return false;
@@ -160,33 +158,13 @@ public class WebServer extends NanoHTTPD {
     }
 
     private boolean estaAutenticado(IHTTPSession session) {
-        // La cookie temporal/permanente es válida tanto para remoto como para LAN.
-        if (tieneCookieValida(session)) return true;
-
-        // Nunca aceptar HTTP Basic a través del dominio público del túnel.
         String host = session.getHeaders().get("host");
-        if (esHostTunnel(host)) return false;
 
-        // Acceso directo en la red local: conservar las credenciales existentes.
-        if (usuarioValido.isEmpty() || passwordValida.isEmpty()) return false;
+        // Acceso local: abierto, sin HTTP Basic y sin contraseña.
+        if (!esHostTunnel(host)) return true;
 
-        String authHeader = session.getHeaders().get("authorization");
-        if (authHeader != null && authHeader.startsWith("Basic ")) {
-            try {
-                String base64Creds = authHeader.substring(6).trim();
-                String credenciales = new String(
-                        Base64.decode(base64Creds, Base64.DEFAULT),
-                        StandardCharsets.UTF_8
-                );
-                String[] partes = credenciales.split(":", 2);
-                return partes.length == 2
-                        && usuarioValido.equals(partes[0])
-                        && passwordValida.equals(partes[1]);
-            } catch (Exception error) {
-                android.util.Log.w("WebServer", "Cabecera HTTP Basic inválida.");
-            }
-        }
-        return false;
+        // Acceso remoto: obligatorio haber pasado por la autorización de PRUX Central.
+        return tieneCookieValida(session);
     }
 
     /**
@@ -205,7 +183,6 @@ public class WebServer extends NanoHTTPD {
 
         String origin = session.getHeaders().get("origin");
         String requestHost = session.getHeaders().get("host");
-
         boolean panelOrigin = "https://detectcameracentral.web.app".equals(origin)
                 || "https://detectcameracentral.firebaseapp.com".equals(origin);
 
@@ -456,18 +433,10 @@ public class WebServer extends NanoHTTPD {
             Response response = newFixedLengthResponse(
                     Response.Status.UNAUTHORIZED,
                     "text/plain; charset=utf-8",
-                    "Acceso Denegado."
+                    "Acceso remoto no autorizado. Abre este dispositivo desde PRUX Central."
             );
-
-            if (!esHostTunnel(session.getHeaders().get("host"))) {
-                response.addHeader(
-                        "WWW-Authenticate",
-                        "Basic realm=\"Acceso Restringido\""
-                );
-            }
-
             response.addHeader("Cache-Control", "no-store");
-
+            response.addHeader("Referrer-Policy", "no-referrer");
             return response;
         }
 
