@@ -52,8 +52,9 @@ public final class WebAccessSettings {
 
     public static String getDisplayText(Context context) {
         String[] credentials = getOrCreate(context);
-        return "Acceso web protegido (HTTP Basic)\nUsuario: " + credentials[0]
+        return "Acceso local protegido (HTTP Basic)\nUsuario: " + credentials[0]
                 + "\nContraseña: " + credentials[1]
-                + "\nGuárdala en un lugar seguro. Se usa también desde Internet.";
+                + "\nSe usa para entrar directamente por IP:8080 en la misma red Wi-Fi. "
+                + "El acceso remoto por PRUX Central se autoriza con tu sesión de administrador.";
     }
 }
