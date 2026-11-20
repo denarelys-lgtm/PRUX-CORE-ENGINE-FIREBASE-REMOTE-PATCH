@@ -54,13 +54,13 @@
             android:id="@+id/txtWebAccess"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Preparando credenciales del servidor web..."
+            android:text="Acceso local sin contraseña. El acceso remoto se autoriza desde PRUX Central."
             android:textSize="13sp"
             android:textColor="#B0BEC5"
             android:background="#1E1E1E"
             android:padding="12dp"
             android:layout_marginTop="14dp"
-            android:textIsSelectable="true" />
+            android:textIsSelectable="false" />
 
         <TextView
             android:id="@+id/txtAdbStatus"
